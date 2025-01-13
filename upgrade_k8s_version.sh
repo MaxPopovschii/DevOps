@@ -66,7 +66,40 @@ upgrade_kubeadm() {
   sudo systemctl restart kubelet
 }
 
-# Inizio del ciclo di aggiornamento
+# Funzione per determinare la versione corrente di CoreDNS
+get_current_coredns_version() {
+  local command="kubectl -n kube-system describe deployment coredns 2>/dev/null | grep 'Image' | awk -F: '{print \$3}'"
+  echo "Eseguito il comando: $command"
+  eval "$command"
+}
+
+# Funzione per aggiornare CoreDNS alla versione target
+update_coredns_version() {
+  local target_version=$1
+  echo "Aggiornamento di CoreDNS alla versione compatibile $target_version..."
+  kubectl -n kube-system get configmap coredns -o yaml > coredns-backup.yaml
+  kubectl apply -f https://raw.githubusercontent.com/coredns/deployment/master/kubernetes/coredns-$target_version.yaml
+}
+
+# Controllo della versione corrente di CoreDNS
+CURRENT_COREDNS_VERSION=$(get_current_coredns_version)
+
+if [ -z "$CURRENT_COREDNS_VERSION" ]; then
+  echo "Impossibile determinare la versione corrente di CoreDNS. Assicurati che il cluster Kubernetes sia accessibile."
+  exit 1
+fi
+
+echo "Versione corrente di CoreDNS rilevata: $CURRENT_COREDNS_VERSION"
+
+# Verifica della compatibilità della versione di CoreDNS
+if [[ "$CURRENT_COREDNS_VERSION" != "1.11.3" ]]; then
+  echo "La versione di CoreDNS non è compatibile. Aggiornamento in corso..."
+  update_coredns_version "1.11.3" # Cambia la versione target con quella desiderata
+else
+  echo "La versione di CoreDNS è compatibile."
+fi
+
+# Inizio del ciclo di aggiornamento di Kubernetes
 while [[ "$(printf '%s\n' "$CURRENT_VERSION" "$TARGET_VERSION" | sort -V | head -n1)" == "$CURRENT_VERSION" ]] && [[ "$CURRENT_VERSION" != "$TARGET_VERSION" ]]; do
   echo "Versione corrente del cluster: $CURRENT_VERSION"
   echo "Versione target del cluster: $TARGET_VERSION"
@@ -89,7 +122,7 @@ while [[ "$(printf '%s\n' "$CURRENT_VERSION" "$TARGET_VERSION" | sort -V | head 
       # Passa alla prossima minor version
       next_minor=$(echo "$current_minor" | awk -F. '{printf "%d.%d", $1, $2+1}')
       update_apt_repo "$next_minor"
-      next_version="$next_minor.0"
+      next_version=$(apt-cache policy kubeadm | grep "Candidate" | awk '{print $2}' | cut -d'-' -f1)
       update_kube_components "$next_version"
       upgrade_kubeadm "$next_version"
       CURRENT_VERSION=$(kubeadm version -o short | tr -d 'v')
@@ -102,12 +135,7 @@ while [[ "$(printf '%s\n' "$CURRENT_VERSION" "$TARGET_VERSION" | sort -V | head 
   fi
 done
 
-# Pausa automatica prima di applicare Flannel
-echo "Il cluster è stato aggiornato alla versione $CURRENT_VERSION."
-echo "Attendi 10 secondi prima di applicare Flannel..."
-sleep 10
-
-# Applica Flannel
+# Applica Flannel se necessario
 echo "Applicazione di Flannel..."
 kubectl apply -f https://github.com/flannel-io/flannel/releases/latest/download/kube-flannel.yml
 
