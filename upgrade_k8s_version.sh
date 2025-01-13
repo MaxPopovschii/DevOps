@@ -89,7 +89,7 @@ while [[ "$(printf '%s\n' "$CURRENT_VERSION" "$TARGET_VERSION" | sort -V | head 
       # Passa alla prossima minor version
       next_minor=$(echo "$current_minor" | awk -F. '{printf "%d.%d", $1, $2+1}')
       update_apt_repo "$next_minor"
-      next_version=$(apt-cache policy kubeadm | grep "Candidate" | awk '{print $2}' | cut -d'-' -f1)
+      next_version="$next_minor.0"
       update_kube_components "$next_version"
       upgrade_kubeadm "$next_version"
       CURRENT_VERSION=$(kubeadm version -o short | tr -d 'v')
@@ -102,7 +102,12 @@ while [[ "$(printf '%s\n' "$CURRENT_VERSION" "$TARGET_VERSION" | sort -V | head 
   fi
 done
 
-# Applica Flannel se necessario
+# Pausa automatica prima di applicare Flannel
+echo "Il cluster è stato aggiornato alla versione $CURRENT_VERSION."
+echo "Attendi 10 secondi prima di applicare Flannel..."
+sleep 10
+
+# Applica Flannel
 echo "Applicazione di Flannel..."
 kubectl apply -f https://github.com/flannel-io/flannel/releases/latest/download/kube-flannel.yml
 
