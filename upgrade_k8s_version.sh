@@ -62,12 +62,12 @@ upgrade_kubeadm() {
   local version=$1
   echo "Applicazione dell'upgrade di kubeadm alla versione $version..."
   sudo kubeadm upgrade plan
-  sudo kubeadm upgrade apply "v$version" --yes
+  sudo kubeadm upgrade apply "v$version" -y
   sudo systemctl restart kubelet
 }
 
 # Inizio del ciclo di aggiornamento di Kubernetes
-while [[ "$(printf '%s\n' "$CURRENT_VERSION" "$TARGET_VERSION" | sort -V | head -n1)" == "$CURRENT_VERSION" ]] && [[ "$CURRENT_VERSION" != "$TARGET_VERSION" ]]; do
+while [[ "$CURRENT_VERSION" != "$TARGET_VERSION" ]]; do
   echo "Versione corrente del cluster: $CURRENT_VERSION"
   echo "Versione target del cluster: $TARGET_VERSION"
 
@@ -77,10 +77,10 @@ while [[ "$(printf '%s\n' "$CURRENT_VERSION" "$TARGET_VERSION" | sort -V | head 
 
   # Ottieni l'ultima patch disponibile per la versione corrente
   update_apt_repo "$current_minor"
-  latest_patch=$( apt-cache policy kubeadm | grep "Candidate" | awk '{print $2}' | cut -d'-' -f1)
+  latest_patch=$(apt-cache policy kubeadm | grep "Candidate" | awk '{print $2}' | cut -d'-' -f1)
 
-  if [[ "$CURRENT_VERSION" == "$latest_patch" ]]; then
-    if [[ "$current_minor" == "$target_minor" ]]; then
+  if [[ "$CURRENT_VERSION" -eq "$latest_patch" ]]; then
+    if [[ "$current_minor" -eq "$target_minor" ]]; then
       # Aggiorna direttamente alla versione target
       update_kube_components "$TARGET_VERSION"
       upgrade_kubeadm "$TARGET_VERSION"
@@ -99,6 +99,9 @@ while [[ "$(printf '%s\n' "$CURRENT_VERSION" "$TARGET_VERSION" | sort -V | head 
     update_kube_components "$latest_patch"
     upgrade_kubeadm "$latest_patch"
     CURRENT_VERSION=$(kubeadm version -o short | tr -d 'v')
+  fi
+  if [[ "$CURRENT_VERSION" -eq "$TARGET_VERSION" ]]; then
+    break;
   fi
 done
 
