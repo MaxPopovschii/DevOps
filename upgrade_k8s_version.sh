@@ -66,39 +66,6 @@ upgrade_kubeadm() {
   sudo systemctl restart kubelet
 }
 
-# Funzione per determinare la versione corrente di CoreDNS
-get_current_coredns_version() {
-  local command="kubectl -n kube-system describe deployment coredns 2>/dev/null | grep 'Image' | awk -F: '{print \$3}'"
-  echo "Eseguito il comando: $command"
-  eval "$command"
-}
-
-# Funzione per aggiornare CoreDNS alla versione target
-update_coredns_version() {
-  local target_version=$1
-  echo "Aggiornamento di CoreDNS alla versione compatibile $target_version..."
-  kubectl -n kube-system get configmap coredns -o yaml > coredns-backup.yaml
-  kubectl apply -f https://raw.githubusercontent.com/coredns/deployment/master/kubernetes/coredns-$target_version.yaml
-}
-
-# Controllo della versione corrente di CoreDNS
-CURRENT_COREDNS_VERSION=$(get_current_coredns_version)
-
-if [ -z "$CURRENT_COREDNS_VERSION" ]; then
-  echo "Impossibile determinare la versione corrente di CoreDNS. Assicurati che il cluster Kubernetes sia accessibile."
-  exit 1
-fi
-
-echo "Versione corrente di CoreDNS rilevata: $CURRENT_COREDNS_VERSION"
-
-# Verifica della compatibilità della versione di CoreDNS
-if [[ "$CURRENT_COREDNS_VERSION" != "1.11.3" ]]; then
-  echo "La versione di CoreDNS non è compatibile. Aggiornamento in corso..."
-  update_coredns_version "1.11.3" # Cambia la versione target con quella desiderata
-else
-  echo "La versione di CoreDNS è compatibile."
-fi
-
 # Inizio del ciclo di aggiornamento di Kubernetes
 while [[ "$(printf '%s\n' "$CURRENT_VERSION" "$TARGET_VERSION" | sort -V | head -n1)" == "$CURRENT_VERSION" ]] && [[ "$CURRENT_VERSION" != "$TARGET_VERSION" ]]; do
   echo "Versione corrente del cluster: $CURRENT_VERSION"
