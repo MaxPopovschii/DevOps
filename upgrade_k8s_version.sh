@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Ensure the script is run as root
+# Make sure only root can run our script
 if [[ $EUID -ne 0 ]]; then
    echo "This script must be run with sudo -E $0" 1>&2
    exit 1
@@ -64,18 +64,22 @@ upgrade_kubeadm() {
   local version=$1
   echo "Applying kubeadm upgrade to version $version..."
   kubeadm upgrade apply "v$version" -y || { echo "Failed to apply kubeadm upgrade for version $version"; exit 1; }
-  systemctl restart kubelet
-  sleep 30
+  #systemctl restart kubelet
+  sleep 90
 }
 
 # Get the latest available patch version for a given minor release
 get_latest_patch_version() {
+  local minor_version=$1
   apt-cache policy kubeadm | grep Candidate | awk '{print $2}' | cut -d'-' -f1
 }
 
 # Extract current and target minor versions
 current_minor=$(echo "$CURRENT_VERSION" | cut -d'.' -f1,2)
 target_minor=$(echo "$TARGET_VERSION" | cut -d'.' -f1,2)
+
+# Update Kubernetes apt keyring
+update_apt_repo "$current_minor"
 
 # Begin the Kubernetes upgrade loop
 while [[ "$CURRENT_VERSION" != "$TARGET_VERSION" ]]; do
@@ -88,10 +92,6 @@ while [[ "$CURRENT_VERSION" != "$TARGET_VERSION" ]]; do
   current_patch=$(echo "$CURRENT_VERSION" | awk -F. '{print $3}')
   target_patch=$(echo "$TARGET_VERSION" | awk -F. '{print $3}')
 
-
-  # Update Kubernetes apt keyring
-  update_apt_repo "$current_minor"
-    
   # If the current version is the same as the target version, break the loop
   if [[ "$CURRENT_VERSION" == "$TARGET_VERSION" ]]; then
     break
@@ -100,7 +100,6 @@ while [[ "$CURRENT_VERSION" != "$TARGET_VERSION" ]]; do
   # If the current minor version is the same as the target version's minor, but patch is lower, upgrade directly to the target version
   if [[ "$current_minor" == "$target_minor" && "$current_patch" -lt "$target_patch" ]]; then
     echo "Upgrading directly to the target version: $TARGET_VERSION"
-    update_apt_repo "$target_minor"
     update_kube_components "$TARGET_VERSION"
     upgrade_kubeadm "$TARGET_VERSION"
     CURRENT_VERSION=$TARGET_VERSION
@@ -108,8 +107,7 @@ while [[ "$CURRENT_VERSION" != "$TARGET_VERSION" ]]; do
   fi
 
   # Get the latest patch version for the current minor version
-  latest_patch_version=$(get_latest_patch_version)
-
+  latest_patch_version=$(get_latest_patch_version "$current_minor")
   if [ -z "$latest_patch_version" ]; then
     echo "Failed to retrieve the next upgrade version. Check the apt repository."
     exit 1
@@ -157,8 +155,6 @@ while [[ "$CURRENT_VERSION" != "$TARGET_VERSION" ]]; do
     update_apt_repo "$current_minor"
   fi
 done
-
-
 
 # Apply Flannel if necessary
 echo "Applying Flannel..."
