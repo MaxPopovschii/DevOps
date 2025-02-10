@@ -115,7 +115,7 @@ while [[ "$CURRENT_VERSION" != "$TARGET_VERSION" ]]; do
   fi
 
   # If the latest patch version is the same as the target version, upgrade directly to it
-  if [[ "$current_minor" == "$target_minor" ]]; then
+  if [[ "$TARGET_VERSION" -lt "$latest_patch_version" ]]; then
     echo "Upgrading directly to the target version: $TARGET_VERSION"
     update_kube_components "$TARGET_VERSION"
     upgrade_kubeadm "$TARGET_VERSION"
@@ -132,7 +132,7 @@ while [[ "$CURRENT_VERSION" != "$TARGET_VERSION" ]]; do
   CURRENT_VERSION=$(kubeadm version -o short | tr -d 'v')
 
   # If the current minor version matches the target, stop updating the minor version
-  if [[ "$current_minor" == "$target_minor" && "$CURRENT_VERSION" == "$TARGET_VERSION" ]]; then
+  if [[ "$current_minor" == "$target_minor" ]]; then
     break
   fi
 
