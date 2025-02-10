@@ -70,7 +70,6 @@ upgrade_kubeadm() {
 
 # Get the latest available patch version for a given minor release
 get_latest_patch_version() {
-  local minor_version=$1
   apt-cache policy kubeadm | grep Candidate | awk '{print $2}' | cut -d'-' -f1
 }
 
@@ -90,8 +89,8 @@ while [[ "$CURRENT_VERSION" != "$TARGET_VERSION" ]]; do
   target_patch=$(echo "$TARGET_VERSION" | awk -F. '{print $3}')
 
 
-    # Update Kubernetes apt keyring
-    update_apt_repo "$current_minor"
+  # Update Kubernetes apt keyring
+  update_apt_repo "$current_minor"
     
   # If the current version is the same as the target version, break the loop
   if [[ "$CURRENT_VERSION" == "$TARGET_VERSION" ]]; then
@@ -109,7 +108,7 @@ while [[ "$CURRENT_VERSION" != "$TARGET_VERSION" ]]; do
   fi
 
   # Get the latest patch version for the current minor version
-  latest_patch_version=$(get_latest_patch_version "$current_minor")
+  latest_patch_version=$(get_latest_patch_version)
 
   if [ -z "$latest_patch_version" ]; then
     echo "Failed to retrieve the next upgrade version. Check the apt repository."
