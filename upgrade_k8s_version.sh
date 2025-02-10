@@ -78,9 +78,6 @@ get_latest_patch_version() {
 current_minor=$(echo "$CURRENT_VERSION" | cut -d'.' -f1,2)
 target_minor=$(echo "$TARGET_VERSION" | cut -d'.' -f1,2)
 
-# Update Kubernetes apt keyring
-update_apt_repo "$current_minor"
-
 # Begin the Kubernetes upgrade loop
 while [[ "$CURRENT_VERSION" != "$TARGET_VERSION" ]]; do
   echo "Current cluster version: $CURRENT_VERSION"
@@ -92,6 +89,10 @@ while [[ "$CURRENT_VERSION" != "$TARGET_VERSION" ]]; do
   current_patch=$(echo "$CURRENT_VERSION" | awk -F. '{print $3}')
   target_patch=$(echo "$TARGET_VERSION" | awk -F. '{print $3}')
 
+
+    # Update Kubernetes apt keyring
+    update_apt_repo "$current_minor"
+    
   # If the current version is the same as the target version, break the loop
   if [[ "$CURRENT_VERSION" == "$TARGET_VERSION" ]]; then
     break
@@ -100,6 +101,7 @@ while [[ "$CURRENT_VERSION" != "$TARGET_VERSION" ]]; do
   # If the current minor version is the same as the target version's minor, but patch is lower, upgrade directly to the target version
   if [[ "$current_minor" == "$target_minor" && "$current_patch" -lt "$target_patch" ]]; then
     echo "Upgrading directly to the target version: $TARGET_VERSION"
+    update_apt_repo "$target_minor"
     update_kube_components "$TARGET_VERSION"
     upgrade_kubeadm "$TARGET_VERSION"
     CURRENT_VERSION=$TARGET_VERSION
@@ -112,6 +114,15 @@ while [[ "$CURRENT_VERSION" != "$TARGET_VERSION" ]]; do
   if [ -z "$latest_patch_version" ]; then
     echo "Failed to retrieve the next upgrade version. Check the apt repository."
     exit 1
+  fi
+
+  # If the latest patch version is greater than the target version, do not upgrade past the target version
+  if [[ "$latest_patch_version" > "$TARGET_VERSION" ]]; then
+    echo "The latest available patch version is greater than the target version. Upgrading directly to the target version: $TARGET_VERSION"
+    update_kube_components "$TARGET_VERSION"
+    upgrade_kubeadm "$TARGET_VERSION"
+    CURRENT_VERSION=$TARGET_VERSION
+    break
   fi
 
   # If the latest patch version is the same as the target version, upgrade directly to it
@@ -147,6 +158,7 @@ while [[ "$CURRENT_VERSION" != "$TARGET_VERSION" ]]; do
     update_apt_repo "$current_minor"
   fi
 done
+
 
 
 # Apply Flannel if necessary
