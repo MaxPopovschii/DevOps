@@ -1,117 +1,139 @@
 #!/bin/bash
 
-# Controllo dei privilegi di root
-if [ "$EUID" -ne 0 ]; then
-  echo "Esegui lo script con privilegi di root."
-  exit 1
+# Ensure the script is run as root
+if [[ $EUID -ne 0 ]]; then
+   echo "This script must be run with sudo -E $0" 1>&2
+   exit 1
 fi
 
-# Controllo degli argomenti dello script
+# Validate the script arguments
 if [ $# -ne 1 ]; then
-  echo "Utilizzo: $0 <versione_target_kubernetes>"
-  echo "Esempio: $0 1.31.0"
+  echo "Usage: $0 <target_kubernetes_version>"
+  echo "Example: $0 1.31.0"
   exit 1
 fi
 
 TARGET_VERSION="$1"
 
-# Validazione del formato della versione target
+# Validate target version format
 if ! [[ "$TARGET_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-  echo "Formato della versione non valido. Usa il formato x.y.z (es. 1.30.0)."
+  echo "Invalid version format. Use x.y.z (e.g., 1.30.0)."
   exit 1
 fi
 
-# Ottieni la versione corrente del cluster
+# Retrieve the current Kubernetes cluster version
 CURRENT_VERSION=$(kubeadm version -o short | tr -d 'v')
 if [ -z "$CURRENT_VERSION" ]; then
-  echo "Impossibile determinare la versione corrente di Kubernetes. Assicurati che kubeadm sia configurato correttamente."
+  echo "Unable to determine the current Kubernetes version. Ensure kubeadm is configured correctly."
   exit 1
 fi
 
-echo "Versione corrente del cluster: $CURRENT_VERSION"
-echo "Versione target del cluster: $TARGET_VERSION"
+echo "Current cluster version: $CURRENT_VERSION"
+echo "Target cluster version: $TARGET_VERSION"
 
-# Verifica se la versione target è inferiore alla versione corrente
+# Check if the target version is lower than the current version
 if [[ "$(printf '%s\n' "$CURRENT_VERSION" "$TARGET_VERSION" | sort -V | head -n1)" == "$TARGET_VERSION" ]] && [[ "$CURRENT_VERSION" != "$TARGET_VERSION" ]]; then
-  echo "Il downgrade non è supportato. La versione corrente ($CURRENT_VERSION) è superiore alla versione target ($TARGET_VERSION)."
+  echo "Downgrade is not supported. The current version ($CURRENT_VERSION) is higher than the target version ($TARGET_VERSION)."
   exit 1
 fi
 
-# Funzione per aggiornare il repository apt
+# Update Kubernetes apt keyring
+echo "Updating Kubernetes apt keyring..."
+rm -rf /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+curl -fsSL https://pkgs.k8s.io/core:/stable:/v${TARGET_VERSION%.*}/deb/Release.key | gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+
+# Function to update apt repository for a specific version
 update_apt_repo() {
   local version=$1
-  echo "Aggiornamento del repository apt per la versione $version..."
-  sudo rm -rf /etc/apt/keyrings/kubernetes-apt-keyring.gpg
-  echo "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v$version/deb/ /" | sudo tee /etc/apt/sources.list.d/kubernetes.list
-  curl -fsSL https://pkgs.k8s.io/core:/stable:/v$version/deb/Release.key | sudo gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+  echo "Updating apt repository for version $version..."
+  echo "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v$version/deb/ /" | tee /etc/apt/sources.list.d/kubernetes.list
+  apt update || { echo "Failed to update apt repository for version $version"; exit 1; }
 }
 
-# Funzione per aggiornare kubeadm, kubelet e kubectl alla versione specificata
+# Function to update kubeadm, kubelet, and kubectl to a specific version
 update_kube_components() {
   local version=$1
-  echo "Aggiornamento di kubeadm, kubelet e kubectl alla versione $version..."
-  sudo apt-mark unhold kubelet kubeadm kubectl
-  sudo apt clean
-  sudo apt update
-  sudo apt install -y kubeadm=$version-1.1 kubelet=$version-1.1 kubectl=$version-1.1
-  sudo apt-mark hold kubelet kubeadm kubectl
+  echo "Updating kubeadm, kubelet, and kubectl to version $version..."
+  apt-mark unhold kubelet kubeadm kubectl
+  apt install -y kubeadm=$version-1.1 kubelet=$version-1.1 kubectl=$version-1.1 || { echo "Failed to install Kubernetes components for version $version"; exit 1; }
+  apt-mark hold kubelet kubeadm kubectl
 }
 
-# Funzione per applicare gli aggiornamenti di kubeadm
+# Function to apply kubeadm upgrade
 upgrade_kubeadm() {
   local version=$1
-  echo "Applicazione dell'upgrade di kubeadm alla versione $version..."
-  sudo kubeadm upgrade plan
-  sudo kubeadm upgrade apply "$version" -y
-  sudo systemctl restart kubelet
+  echo "Applying kubeadm upgrade to version $version..."
+  kubeadm upgrade apply "v$version" -y || { echo "Failed to apply kubeadm upgrade for version $version"; exit 1; }
+  systemctl restart kubelet
   sleep 30
 }
 
-# Funzione per ottenere la versione candidata di kubeadm
-get_candidate_version() {
-  apt-cache policy kubeadm | grep "Candidate" | awk '{print $2}' | cut -d'-' -f1
+# Get the latest available patch version for a given minor release
+get_latest_patch_version() {
+  local minor_version=$1
+  apt-cache madison kubeadm | grep "$minor_version" | awk '{print $3}' | cut -d'-' -f1 | sort -Vr | head -n1
 }
 
-# Estrai la minor version corrente e quella target
+# Extract current and target minor versions
 current_minor=$(echo "$CURRENT_VERSION" | cut -d'.' -f1,2)
 target_minor=$(echo "$TARGET_VERSION" | cut -d'.' -f1,2)
 
-# Inizio del ciclo di aggiornamento di Kubernetes
+# Update Kubernetes apt keyring
+update_apt_repo "$current_minor"
+
+# Begin the Kubernetes upgrade loop
 while [[ "$CURRENT_VERSION" != "$TARGET_VERSION" ]]; do
-  echo "Versione corrente del cluster: $CURRENT_VERSION"
-  echo "Versione target del cluster: $TARGET_VERSION"
+  echo "Current cluster version: $CURRENT_VERSION"
+  echo "Target cluster version: $TARGET_VERSION"
 
-  # Recupera la versione candidata disponibile per kubeadm nel repository
-  candidate_version=$(get_candidate_version)
+  # Extract minor and patch versions for comparison
+  current_minor=$(echo "$CURRENT_VERSION" | awk -F. '{print $1"."$2}')
+  target_minor=$(echo "$TARGET_VERSION" | awk -F. '{print $1"."$2}')
+  current_patch=$(echo "$CURRENT_VERSION" | awk -F. '{print $3}')
+  target_patch=$(echo "$TARGET_VERSION" | awk -F. '{print $3}')
 
-  # Se la versione corrente è uguale alla versione candidata, incrementiamo la minor
-  if [ "$CURRENT_VERSION" == "$candidate_version" ]; then
-    # Incrementa la versione minor
-    current_minor=$(echo "$current_minor" | awk -F. '{printf "%d.%d", $1, $2+1}')
-
-    # Aggiorna il repository apt alla nuova minor version
-    update_apt_repo "$current_minor"
-
-    # Aggiorna alla versione x.minor.0
-    update_kube_components "$current_minor.0"
-    upgrade_kubeadm "$current_minor.0"
-  else
-    # Se la versione corrente non è uguale alla candidata, aggiorniamo alla versione candidata
-    update_kube_components "$candidate_version"
-    upgrade_kubeadm "$candidate_version"
-  fi
-
-  # Aggiorna la versione corrente
-  CURRENT_VERSION=$(kubeadm version -o short | tr -d 'v')
-
-  # Verifica se la versione target è stata raggiunta
+  # If the current version is the same as the target version, break the loop
   if [[ "$CURRENT_VERSION" == "$TARGET_VERSION" ]]; then
     break
   fi
+
+  # If the current minor version is the same as the target version's minor, but patch is lower, upgrade to the target patch
+  if [[ "$current_minor" == "$target_minor" && "$current_patch" -lt "$target_patch" ]]; then
+    echo "Upgrading directly to the target version: $TARGET_VERSION"
+    update_kube_components "$TARGET_VERSION"
+    upgrade_kubeadm "$TARGET_VERSION"
+    CURRENT_VERSION=$TARGET_VERSION
+    break
+  fi
+
+  # Get the latest patch version for the current minor version
+  latest_patch_version=$(get_latest_patch_version "$current_minor")
+
+  if [ -z "$latest_patch_version" ]; then
+    echo "Failed to retrieve the next upgrade version. Check the apt repository."
+    exit 1
+  fi
+
+  # Update components and apply kubeadm upgrade
+  update_kube_components "$latest_patch_version"
+  upgrade_kubeadm "$latest_patch_version"
+
+  # Update the current version
+  CURRENT_VERSION=$(kubeadm version -o short | tr -d 'v')
+
+  # If the current minor version matches the target, stop updating the minor version
+  if [[ "$current_minor" == "$target_minor" ]]; then
+    break
+  fi
+
+  # Increment the minor version
+  current_minor=$(echo "$current_minor" | awk -F. '{printf "%d.%d", $1, $2+1}')
+  update_apt_repo "$current_minor"
 done
 
-# Applica Flannel se necessario
-echo "Applicazione di Flannel..."
+
+# Apply Flannel if necessary
+echo "Applying Flannel..."
 kubectl apply -f https://github.com/flannel-io/flannel/releases/latest/download/kube-flannel.yml
 
-echo "Aggiornamento completato. Kubernetes è stato aggiornato alla versione $CURRENT_VERSION."
+echo "Upgrade completed. Kubernetes has been upgraded to version $CURRENT_VERSION."
