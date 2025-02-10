@@ -97,7 +97,7 @@ while [[ "$CURRENT_VERSION" != "$TARGET_VERSION" ]]; do
     break
   fi
 
-  # If the current minor version is the same as the target version's minor, but patch is lower, upgrade to the target patch
+  # If the current minor version is the same as the target version's minor, but patch is lower, upgrade directly to the target version
   if [[ "$current_minor" == "$target_minor" && "$current_patch" -lt "$target_patch" ]]; then
     echo "Upgrading directly to the target version: $TARGET_VERSION"
     update_kube_components "$TARGET_VERSION"
@@ -123,7 +123,7 @@ while [[ "$CURRENT_VERSION" != "$TARGET_VERSION" ]]; do
     break
   fi
 
-  # Update components and apply kubeadm upgrade to the latest patch version
+  # If we're not on the target version, continue upgrading to the latest patch of the current minor
   echo "Upgrading to the latest patch version: $latest_patch_version"
   update_kube_components "$latest_patch_version"
   upgrade_kubeadm "$latest_patch_version"
@@ -141,12 +141,13 @@ while [[ "$CURRENT_VERSION" != "$TARGET_VERSION" ]]; do
     break
   fi
 
-  # Increment the minor version if needed
+  # Increment the minor version if needed, but do this only if we're still in a lower minor version than the target
   if [[ "$current_minor" != "$target_minor" ]]; then
     current_minor=$(echo "$current_minor" | awk -F. '{printf "%d.%d", $1, $2+1}')
     update_apt_repo "$current_minor"
   fi
 done
+
 
 # Apply Flannel if necessary
 echo "Applying Flannel..."
