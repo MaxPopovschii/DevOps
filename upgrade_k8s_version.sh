@@ -71,7 +71,7 @@ upgrade_kubeadm() {
 # Get the latest available patch version for a given minor release
 get_latest_patch_version() {
   local minor_version=$1
-  apt-cache madison kubeadm | grep "$minor_version" | awk '{print $3}' | cut -d'-' -f1 | sort -Vr | head -n1
+  apt-cache policy kubeadm | grep Candidate | awk '{print $2}' | cut -d'-' -f1
 }
 
 # Extract current and target minor versions
@@ -114,7 +114,17 @@ while [[ "$CURRENT_VERSION" != "$TARGET_VERSION" ]]; do
     exit 1
   fi
 
+  # If the latest patch version is the same as the target version, upgrade directly to it
+  if [[ "$latest_patch_version" == "$TARGET_VERSION" ]]; then
+    echo "Upgrading directly to the target version: $TARGET_VERSION"
+    update_kube_components "$TARGET_VERSION"
+    upgrade_kubeadm "$TARGET_VERSION"
+    CURRENT_VERSION=$TARGET_VERSION
+    break
+  fi
+
   # Update components and apply kubeadm upgrade
+  echo "Upgrading to the latest patch version: $latest_patch_version"
   update_kube_components "$latest_patch_version"
   upgrade_kubeadm "$latest_patch_version"
 
@@ -122,14 +132,17 @@ while [[ "$CURRENT_VERSION" != "$TARGET_VERSION" ]]; do
   CURRENT_VERSION=$(kubeadm version -o short | tr -d 'v')
 
   # If the current minor version matches the target, stop updating the minor version
-  if [[ "$current_minor" == "$target_minor" ]]; then
+  if [[ "$current_minor" == "$target_minor" && "$CURRENT_VERSION" == "$TARGET_VERSION" ]]; then
     break
   fi
 
   # Increment the minor version
-  current_minor=$(echo "$current_minor" | awk -F. '{printf "%d.%d", $1, $2+1}')
-  update_apt_repo "$current_minor"
+  if [[ "$current_minor" != "$target_minor" ]]; then
+    current_minor=$(echo "$current_minor" | awk -F. '{printf "%d.%d", $1, $2+1}')
+    update_apt_repo "$current_minor"
+  fi
 done
+
 
 
 # Apply Flannel if necessary
