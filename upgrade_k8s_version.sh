@@ -40,7 +40,7 @@ fi
 # Update Kubernetes apt keyring
 echo "Updating Kubernetes apt keyring..."
 rm -rf /etc/apt/keyrings/kubernetes-apt-keyring.gpg
-curl -fsSL https://pkgs.k8s.io/core:/stable:/v${TARGET_VERSION%.*}/deb/Release.key | gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+curl -fsSL https://pkgs.k8s.io/core:/stable:/v"${TARGET_VERSION%.*}"/deb/Release.key | gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
 
 # Function to update apt repository for a specific version
 update_apt_repo() {
@@ -55,7 +55,7 @@ update_kube_components() {
   local version=$1
   echo "Updating kubeadm, kubelet, and kubectl to version $version..."
   apt-mark unhold kubelet kubeadm kubectl
-  apt install -y kubeadm=$version-1.1 kubelet=$version-1.1 kubectl=$version-1.1 || { echo "Failed to install Kubernetes components for version $version"; exit 1; }
+  apt install -y kubeadm="$version"-1.1 kubelet="$version"-1.1 kubectl="$version"-1.1 || { echo "Failed to install Kubernetes components for version $version"; exit 1; }
   apt-mark hold kubelet kubeadm kubectl
 }
 
@@ -88,7 +88,6 @@ while [[ "$CURRENT_VERSION" != "$TARGET_VERSION" ]]; do
   # Extract minor and patch versions for comparison
   current_minor=$(echo "$CURRENT_VERSION" | awk -F. '{print $1"."$2}')
   target_minor=$(echo "$TARGET_VERSION" | awk -F. '{print $1"."$2}')
-  current_patch=$(echo "$CURRENT_VERSION" | awk -F. '{print $3}')
   target_patch=$(echo "$TARGET_VERSION" | awk -F. '{print $3}')
 
   # Get the latest patch version for the current minor version
@@ -120,7 +119,6 @@ while [[ "$CURRENT_VERSION" != "$TARGET_VERSION" ]]; do
     update_apt_repo "$current_minor"
   fi
 done
-
 
 # Apply Flannel if necessary
 echo "Applying Flannel..."
