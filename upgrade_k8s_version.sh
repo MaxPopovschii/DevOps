@@ -65,12 +65,11 @@ upgrade_kubeadm() {
   echo "Applying kubeadm upgrade to version $version..."
   kubeadm upgrade apply "v$version" -y || { echo "Failed to apply kubeadm upgrade for version $version"; exit 1; }
   #systemctl restart kubelet
-  sleep 300
+  sleep 30
 }
 
 # Get the latest available patch version for a given minor release
 get_latest_patch_version() {
-  local minor_version=$1
   apt-cache policy kubeadm | grep Candidate | awk '{print $2}' | cut -d'-' -f1
 }
 
@@ -92,69 +91,36 @@ while [[ "$CURRENT_VERSION" != "$TARGET_VERSION" ]]; do
   current_patch=$(echo "$CURRENT_VERSION" | awk -F. '{print $3}')
   target_patch=$(echo "$TARGET_VERSION" | awk -F. '{print $3}')
 
-  # If the current version is the same as the target version, break the loop
-  if [[ "$CURRENT_VERSION" == "$TARGET_VERSION" ]]; then
-    break
-  fi
-
-  # If the current minor version is the same as the target version's minor, but patch is lower, upgrade directly to the target version
-  if [[ "$current_minor" == "$target_minor" && "$current_patch" -lt "$target_patch" ]]; then
-    echo "Upgrading directly to the target version: $TARGET_VERSION"
-    update_kube_components "$TARGET_VERSION"
-    upgrade_kubeadm "$TARGET_VERSION"
-    CURRENT_VERSION=$TARGET_VERSION
-    break
-  fi
-
   # Get the latest patch version for the current minor version
-  latest_patch_version=$(get_latest_patch_version "$current_minor")
+  latest_patch_version=$(get_latest_patch_version)
   if [ -z "$latest_patch_version" ]; then
     echo "Failed to retrieve the next upgrade version. Check the apt repository."
     exit 1
   fi
 
-  # If the latest patch version is greater than the target version, do not upgrade past the target version
-  if [[ "$latest_patch_version" > "$TARGET_VERSION" ]]; then
-    echo "The latest available patch version is greater than the target version. Upgrading directly to the target version: $TARGET_VERSION"
-    update_kube_components "$TARGET_VERSION"
-    upgrade_kubeadm "$TARGET_VERSION"
-    CURRENT_VERSION=$TARGET_VERSION
-    break
-  fi
+  case 1 in
+    $((latest_patch_version > target_patch)))
+      echo "Upgrading directly to the target version: $TARGET_VERSION"
+      update_kube_components "$TARGET_VERSION"
+      upgrade_kubeadm "$TARGET_VERSION"
+      CURRENT_VERSION=$TARGET_VERSION
+      ;;
 
-  # If the latest patch version is the same as the target version, upgrade directly to it
-  if [[ "$latest_patch_version" == "$TARGET_VERSION" ]]; then
-    echo "Upgrading directly to the target version: $TARGET_VERSION"
-    update_kube_components "$TARGET_VERSION"
-    upgrade_kubeadm "$TARGET_VERSION"
-    CURRENT_VERSION=$TARGET_VERSION
-    break
-  fi
+    *)
+      echo "Performing default upgrade to the latest patch version: $latest_patch_version"
+      update_kube_components "$latest_patch_version"
+      upgrade_kubeadm "$latest_patch_version"
+      CURRENT_VERSION=$(kubeadm version -o short | tr -d 'v')
+      ;;
+  esac
 
-  # If we're not on the target version, continue upgrading to the latest patch of the current minor
-  echo "Upgrading to the latest patch version: $latest_patch_version"
-  update_kube_components "$latest_patch_version"
-  upgrade_kubeadm "$latest_patch_version"
-
-  # Update the current version
-  CURRENT_VERSION=$(kubeadm version -o short | tr -d 'v')
-
-  # Check if the current version is the same as the target version and break
-  if [[ "$CURRENT_VERSION" == "$TARGET_VERSION" ]]; then
-    break
-  fi
-
-  # If the current minor version matches the target, stop updating the minor version
-  if [[ "$current_minor" == "$target_minor" ]]; then
-    break
-  fi
-
-  # Increment the minor version if needed, but do this only if we're still in a lower minor version than the target
+  # Update minor version if needed and not at the target
   if [[ "$current_minor" != "$target_minor" ]]; then
     current_minor=$(echo "$current_minor" | awk -F. '{printf "%d.%d", $1, $2+1}')
     update_apt_repo "$current_minor"
   fi
 done
+
 
 # Apply Flannel if necessary
 echo "Applying Flannel..."
