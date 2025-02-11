@@ -65,7 +65,7 @@ upgrade_kubeadm() {
   echo "Applying kubeadm upgrade to version $version..."
   kubeadm upgrade apply "v$version" -y || { echo "Failed to apply kubeadm upgrade for version $version"; exit 1; }
   #systemctl restart kubelet
-  sleep 90
+  sleep 300
 }
 
 # Get the latest available patch version for a given minor release
