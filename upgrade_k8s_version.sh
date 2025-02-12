@@ -80,44 +80,61 @@ target_minor=$(echo "$TARGET_VERSION" | cut -d'.' -f1,2)
 # Update Kubernetes apt keyring
 update_apt_repo "$current_minor"
 
-# Begin the Kubernetes upgrade loop
 while [[ "$CURRENT_VERSION" != "$TARGET_VERSION" ]]; do
   echo "Current cluster version: $CURRENT_VERSION"
   echo "Target cluster version: $TARGET_VERSION"
 
-  # Extract minor and patch versions for comparison
-  current_minor=$(echo "$CURRENT_VERSION" | awk -F. '{print $1"."$2}')
-  target_minor=$(echo "$TARGET_VERSION" | awk -F. '{print $1"."$2}')
+  # Estrai le parti della versione
+  current_major=$(echo "$CURRENT_VERSION" | awk -F. '{print $1}')
+  current_minor=$(echo "$CURRENT_VERSION" | awk -F. '{print $2}')
+  current_patch=$(echo "$CURRENT_VERSION" | awk -F. '{print $3}')
+
+  target_major=$(echo "$TARGET_VERSION" | awk -F. '{print $1}')
+  target_minor=$(echo "$TARGET_VERSION" | awk -F. '{print $2}')
   target_patch=$(echo "$TARGET_VERSION" | awk -F. '{print $3}')
 
-  # Get the latest patch version for the current minor version
+  # Verifica se siamo già aggiornati
+  if [[ "$CURRENT_VERSION" == "$TARGET_VERSION" ]]; then
+    echo "Already at target version: $TARGET_VERSION"
+    break
+  fi
+
+  # Ottieni l'ultima patch disponibile per la minor corrente
   latest_patch_version=$(get_latest_patch_version)
   if [ -z "$latest_patch_version" ]; then
-    echo "Failed to retrieve the next upgrade version. Check the apt repository."
+    echo "Failed to retrieve the latest patch version. Check the repository."
     exit 1
   fi
 
   case 1 in
-    $((latest_patch_version > target_patch)))
-      echo "Upgrading directly to the target version: $TARGET_VERSION"
+    # Se siamo nello stesso minor, ma con un patch inferiore
+    $((current_minor == target_minor && current_patch < target_patch)))
+      echo "Upgrading from $CURRENT_VERSION to $TARGET_VERSION (patch update)"
       update_kube_components "$TARGET_VERSION"
       upgrade_kubeadm "$TARGET_VERSION"
       CURRENT_VERSION=$TARGET_VERSION
       ;;
 
-    *)
-      echo "Performing default upgrade to the latest patch version: $latest_patch_version"
+    # Se siamo in un minor inferiore, aggiorniamo prima all'ultimo patch disponibile
+    $((current_minor < target_minor)))
+      echo "Upgrading minor: Moving from $CURRENT_VERSION to latest patch $latest_patch_version"
       update_kube_components "$latest_patch_version"
       upgrade_kubeadm "$latest_patch_version"
       CURRENT_VERSION=$(kubeadm version -o short | tr -d 'v')
+
+      # Se il minor è ancora inferiore dopo l'update, aggiorniamo l'APT per il prossimo minor
+      if [[ "$current_minor" -lt "$target_minor" ]]; then
+        next_minor=$((current_minor + 1))
+        update_apt_repo "$current_major.$next_minor"
+      fi
+      ;;
+
+    # Caso imprevisto (debug)
+    *)
+      echo "Unexpected case. Current version: $CURRENT_VERSION, Target: $TARGET_VERSION"
+      exit 1
       ;;
   esac
-
-  # Update minor version if needed and not at the target
-  if [[ "$current_minor" != "$target_minor" ]]; then
-    current_minor=$(echo "$current_minor" | awk -F. '{printf "%d.%d", $1, $2+1}')
-    update_apt_repo "$current_minor"
-  fi
 done
 
 # Apply Flannel if necessary
