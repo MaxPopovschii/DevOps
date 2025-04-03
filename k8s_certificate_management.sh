@@ -1,232 +1,490 @@
 #!/bin/bash
-# Kubernetes Certificate Management PoC
-# This script demonstrates how to create a long-lived root CA and user certificates
-# for use across all Kubernetes environments.
+# Kubernetes Certificate Management Automation Script
+# This script automates the creation of a 50-year Root CA and user certificates
+# for Kubernetes with different validity periods.
 
 set -e
 
-# Create directory structure
-mkdir -p ca/root-ca
-mkdir -p ca/users/{admin,qa-developer,external-developer}
-mkdir -p k8s-configs
+# Color codes for better output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
 
-# Step 1: Create a 50-year Root CA
-echo "Creating 50-year Root CA..."
+# Configuration
+ROOT_CA_DAYS=18262 # 50 years
+ADMIN_CERT_DAYS=5475 # 15 years
+QA_DEV_CERT_DAYS=5475 # 15 years
+EXT_DEV_CERT_DAYS=730 # 2 years
 
-# Generate root CA private key
-openssl genrsa -out ca/root-ca/ca.key 4096
+# Directory structure
+BASE_DIR="k8s-pki"
+CA_DIR="$BASE_DIR/ca"
+USERS_DIR="$BASE_DIR/users"
+CONFIGS_DIR="$BASE_DIR/configs"
+KUBECONFIG_DIR="$BASE_DIR/kubeconfigs"
 
-# Generate root CA certificate (50 years validity)
-openssl req -x509 -new -nodes -key ca/root-ca/ca.key -sha256 -days 18250 \
-  -out ca/root-ca/ca.crt -subj "/CN=Kubernetes-Root-CA/O=Organization"
+# Environment configuration
+ENVIRONMENTS=(
+  "dev:https://k8s-dev.example.com:6443"
+  "test:https://k8s-test.example.com:6443"
+  "prod:https://k8s-prod.example.com:6443"
+)
 
-echo "Root CA created successfully with 50-year validity"
+# Create directories
+echo -e "${BLUE}Creating directory structure...${NC}"
+mkdir -p "$CA_DIR" "$USERS_DIR" "$CONFIGS_DIR" "$KUBECONFIG_DIR"
 
-# Step 2: Create user certificates with different validities
+# Create Root CA
+create_root_ca() {
+  echo -e "${BLUE}Creating Root CA (valid for 50 years)...${NC}"
+  
+  if [ -f "$CA_DIR/ca.key" ] && [ -f "$CA_DIR/ca.crt" ]; then
+    echo -e "${YELLOW}Root CA already exists. Skipping creation.${NC}"
+    return
+  fi
+  
+  openssl genrsa -out "$CA_DIR/ca.key" 4096
+  
+  openssl req -x509 -new -nodes -key "$CA_DIR/ca.key" -sha256 -days $ROOT_CA_DAYS \
+    -out "$CA_DIR/ca.crt" -subj "/CN=K8s-Enterprise-Root-CA/O=OurOrganization/OU=IT/C=US"
+  
+  echo -e "${GREEN}Root CA created successfully.${NC}"
+}
 
-# Function to create user certificates
+# Create user certificate
 create_user_cert() {
   local USER=$1
   local DAYS=$2
   local O=$3
-  local CN="$USER"
+  local OU=$4
   
-  echo "Creating certificate for $USER with $DAYS days validity..."
+  echo -e "${BLUE}Creating certificate for $USER (valid for $(($DAYS / 365)) years)...${NC}"
   
-  # Generate user private key
-  openssl genrsa -out ca/users/$USER/$USER.key 2048
+  if [ -f "$USERS_DIR/$USER.key" ] && [ -f "$USERS_DIR/$USER.crt" ]; then
+    echo -e "${YELLOW}Certificate for $USER already exists. Skipping creation.${NC}"
+    return
+  fi
   
-  # Generate user certificate signing request (CSR)
-  openssl req -new -key ca/users/$USER/$USER.key -out ca/users/$USER/$USER.csr \
-    -subj "/CN=$CN/O=$O"
+  # Generate key
+  openssl genrsa -out "$USERS_DIR/$USER.key" 2048
   
-  # Sign the user certificate using the Root CA
-  openssl x509 -req -in ca/users/$USER/$USER.csr -CA ca/root-ca/ca.crt \
-    -CAkey ca/root-ca/ca.key -CAcreateserial -out ca/users/$USER/$USER.crt \
-    -days $DAYS -sha256
-    
-  # Create kubeconfig for the user
-  KUBECONFIG_FILE="k8s-configs/kubeconfig-$USER"
+  # Create CSR
+  openssl req -new -key "$USERS_DIR/$USER.key" -out "$USERS_DIR/$USER.csr" \
+    -subj "/CN=$USER/O=$O/OU=$OU/C=US"
   
-  # Set cluster info
-  kubectl config set-cluster kubernetes \
-    --certificate-authority=ca/root-ca/ca.crt \
-    --embed-certs=true \
-    --server=https://kubernetes.example.com:6443 \
-    --kubeconfig=$KUBECONFIG_FILE
+  # Create config file
+  cat > "$CONFIGS_DIR/$USER-cert.conf" <<EOF
+[ v3_ext ]
+authorityKeyIdentifier=keyid,issuer:always
+basicConstraints=CA:FALSE
+keyUsage=keyEncipherment,digitalSignature
+extendedKeyUsage=clientAuth
+subjectAltName=@alt_names
 
-  # Set user credentials
-  kubectl config set-credentials $USER \
-    --client-certificate=ca/users/$USER/$USER.crt \
-    --client-key=ca/users/$USER/$USER.key \
-    --embed-certs=true \
-    --kubeconfig=$KUBECONFIG_FILE
-
-  # Set context
-  kubectl config set-context $USER-context \
-    --cluster=kubernetes \
-    --user=$USER \
-    --namespace=default \
-    --kubeconfig=$KUBECONFIG_FILE
-
-  # Use the created context
-  kubectl config use-context $USER-context --kubeconfig=$KUBECONFIG_FILE
+[alt_names]
+DNS.1 = $USER
+EOF
   
-  echo "Certificate for $USER created successfully"
+  # Sign certificate with CA
+  openssl x509 -req -in "$USERS_DIR/$USER.csr" -CA "$CA_DIR/ca.crt" -CAkey "$CA_DIR/ca.key" \
+    -CAcreateserial -out "$USERS_DIR/$USER.crt" -days $DAYS \
+    -extensions v3_ext -extfile "$CONFIGS_DIR/$USER-cert.conf"
+  
+  echo -e "${GREEN}Certificate for $USER created successfully.${NC}"
 }
 
-# Create Admin certificate (15 years validity)
-create_user_cert "admin" 5475 "system:masters"
+# Create kubeconfig for user
+create_kubeconfig() {
+  local USER=$1
+  local ENV=$2
+  local SERVER=$3
+  
+  echo -e "${BLUE}Creating kubeconfig for $USER in $ENV environment...${NC}"
+  
+  # Set up cluster
+  kubectl config set-cluster "k8s-$ENV" \
+    --certificate-authority="$CA_DIR/ca.crt" \
+    --embed-certs=true \
+    --server="$SERVER" \
+    --kubeconfig="$KUBECONFIG_DIR/$USER-$ENV.kubeconfig"
+  
+  # Set up user
+  kubectl config set-credentials "$USER" \
+    --client-certificate="$USERS_DIR/$USER.crt" \
+    --client-key="$USERS_DIR/$USER.key" \
+    --embed-certs=true \
+    --kubeconfig="$KUBECONFIG_DIR/$USER-$ENV.kubeconfig"
+  
+  # Set up context
+  kubectl config set-context "$USER@k8s-$ENV" \
+    --cluster="k8s-$ENV" \
+    --user="$USER" \
+    --kubeconfig="$KUBECONFIG_DIR/$USER-$ENV.kubeconfig"
+  
+  # Use context
+  kubectl config use-context "$USER@k8s-$ENV" \
+    --kubeconfig="$KUBECONFIG_DIR/$USER-$ENV.kubeconfig"
+  
+  echo -e "${GREEN}Kubeconfig for $USER in $ENV environment created successfully.${NC}"
+}
 
-# Create QA Developer certificate (15 years validity)
-create_user_cert "qa-developer" 5475 "qa-developers"
+# Create universal kubeconfig for user (with placeholder server)
+create_universal_kubeconfig() {
+  local USER=$1
+  
+  echo -e "${BLUE}Creating universal kubeconfig for $USER...${NC}"
+  
+  # Set up cluster with placeholder
+  kubectl config set-cluster "universal-cluster" \
+    --certificate-authority="$CA_DIR/ca.crt" \
+    --embed-certs=true \
+    --server="https://PLACEHOLDER:6443" \
+    --kubeconfig="$KUBECONFIG_DIR/$USER-universal.kubeconfig"
+  
+  # Set up user
+  kubectl config set-credentials "$USER" \
+    --client-certificate="$USERS_DIR/$USER.crt" \
+    --client-key="$USERS_DIR/$USER.key" \
+    --embed-certs=true \
+    --kubeconfig="$KUBECONFIG_DIR/$USER-universal.kubeconfig"
+  
+  # Set up context
+  kubectl config set-context "$USER@universal-cluster" \
+    --cluster="universal-cluster" \
+    --user="$USER" \
+    --kubeconfig="$KUBECONFIG_DIR/$USER-universal.kubeconfig"
+  
+  # Use context
+  kubectl config use-context "$USER@universal-cluster" \
+    --kubeconfig="$KUBECONFIG_DIR/$USER-universal.kubeconfig"
+  
+  echo -e "${GREEN}Universal kubeconfig for $USER created successfully.${NC}"
+}
 
-# Create External Developer certificate (2 years validity)
-create_user_cert "external-developer" 730 "external-developers"
+# Create context switch script
+create_context_switch_script() {
+  echo -e "${BLUE}Creating context switch script...${NC}"
+  
+  cat > "$BASE_DIR/switch-context.sh" <<'EOF'
+#!/bin/bash
+# K8s Context Switch Script
 
-# Step 3: Create RBAC configurations for different user roles
-cat > k8s-configs/rbac-qa-developers.yaml <<EOF
-kind: ClusterRole
-apiVersion: rbac.authorization.k8s.io/v1
-metadata:
-  name: qa-developer-role
-rules:
-- apiGroups: ["", "apps", "batch"]
-  resources: ["pods", "services", "deployments", "jobs"]
-  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-- apiGroups: [""]
-  resources: ["configmaps", "secrets"]
-  verbs: ["get", "list", "watch"]
----
-kind: ClusterRoleBinding
-apiVersion: rbac.authorization.k8s.io/v1
-metadata:
-  name: qa-developer-binding
-subjects:
-- kind: Group
-  name: qa-developers
-  apiGroup: rbac.authorization.k8s.io
-roleRef:
-  kind: ClusterRole
-  name: qa-developer-role
-  apiGroup: rbac.authorization.k8s.io
+USER=$1
+ENV=$2
+
+if [ -z "$USER" ] || [ -z "$ENV" ]; then
+  echo "Usage: $0 <user> <environment>"
+  echo "Example: $0 admin production"
+  exit 1
+fi
+
+SCRIPT_DIR=$(dirname "$(readlink -f "$0")")
+KUBECONFIG_FILE="$SCRIPT_DIR/kubeconfigs/$USER-universal.kubeconfig"
+
+if [ ! -f "$KUBECONFIG_FILE" ]; then
+  echo "Error: Kubeconfig for user $USER not found."
+  exit 1
+fi
+
+SERVER=""
+case $ENV in
+  "dev")
+    SERVER="https://k8s-dev.example.com:6443"
+    ;;
+  "test")
+    SERVER="https://k8s-test.example.com:6443"
+    ;;
+  "prod")
+    SERVER="https://k8s-prod.example.com:6443"
+    ;;
+  *)
+    echo "Unknown environment: $ENV"
+    echo "Valid environments: dev, test, prod"
+    exit 1
+    ;;
+esac
+
+# Update the server in the kubeconfig file
+sed -i "s|server: https://[^:]*:6443|server: $SERVER|g" "$KUBECONFIG_FILE"
+
+echo "Kubeconfig for $USER updated to use $ENV environment ($SERVER)"
+echo "Use it with: kubectl --kubeconfig=$KUBECONFIG_FILE get pods"
 EOF
+  
+  chmod +x "$BASE_DIR/switch-context.sh"
+  echo -e "${GREEN}Context switch script created successfully.${NC}"
+}
 
-cat > k8s-configs/rbac-external-developers.yaml <<EOF
-kind: Role
-apiVersion: rbac.authorization.k8s.io/v1
-metadata:
-  name: external-developer-role
-  namespace: external-dev
-rules:
-- apiGroups: ["", "apps"]
-  resources: ["pods", "services", "deployments"]
-  verbs: ["get", "list", "watch", "create", "update"]
-- apiGroups: [""]
-  resources: ["configmaps"]
-  verbs: ["get", "list", "watch"]
----
-kind: RoleBinding
-apiVersion: rbac.authorization.k8s.io/v1
-metadata:
-  name: external-developer-binding
-  namespace: external-dev
-subjects:
-- kind: Group
-  name: external-developers
-  apiGroup: rbac.authorization.k8s.io
-roleRef:
-  kind: Role
-  name: external-developer-role
-  apiGroup: rbac.authorization.k8s.io
+# Create certificate expiry monitoring script
+create_cert_monitor_script() {
+  echo -e "${BLUE}Creating certificate monitoring script...${NC}"
+  
+  cat > "$BASE_DIR/check-cert-expiry.sh" <<'EOF'
+#!/bin/bash
+# Certificate Expiry Monitoring Script
+
+SCRIPT_DIR=$(dirname "$(readlink -f "$0")")
+CERT_DIR="$SCRIPT_DIR/users"
+WARNING_DAYS=180
+
+if [ ! -d "$CERT_DIR" ]; then
+  echo "Error: Certificate directory not found."
+  exit 1
+fi
+
+echo "Checking certificate expiry dates..."
+echo "--------------------------------------"
+
+for cert in "$CERT_DIR"/*.crt; do
+  if [ ! -f "$cert" ]; then
+    echo "No certificates found."
+    exit 0
+  fi
+  
+  cert_name=$(basename "$cert")
+  end_date=$(openssl x509 -enddate -noout -in "$cert" | cut -d= -f2)
+  end_epoch=$(date -d "$end_date" +%s)
+  now_epoch=$(date +%s)
+  days_left=$(( (end_epoch - now_epoch) / 86400 ))
+  
+  echo "Certificate: $cert_name"
+  echo "Expires on: $end_date"
+  echo "Days left: $days_left"
+  
+  if [ $days_left -lt $WARNING_DAYS ]; then
+    echo "WARNING: Certificate will expire in less than $WARNING_DAYS days!"
+  fi
+  
+  echo "--------------------------------------"
+done
 EOF
+  
+  chmod +x "$BASE_DIR/check-cert-expiry.sh"
+  echo -e "${GREEN}Certificate monitoring script created successfully.${NC}"
+}
 
-echo "Created RBAC configurations for user roles"
+# Create certificate renewal script
+create_cert_renewal_script() {
+  echo -e "${BLUE}Creating certificate renewal script...${NC}"
+  
+  cat > "$BASE_DIR/renew-cert.sh" <<'EOF'
+#!/bin/bash
+# Certificate Renewal Script
 
-# Step 4: Instructions for applying configurations to Kubernetes clusters
-cat > README.md <<EOF
-# Kubernetes Certificate Management PoC
+SCRIPT_DIR=$(dirname "$(readlink -f "$0")")
+USERS_DIR="$SCRIPT_DIR/users"
+CONFIGS_DIR="$SCRIPT_DIR/configs"
+CA_DIR="$SCRIPT_DIR/ca"
 
-This PoC demonstrates how to create and manage certificates for Kubernetes with a long-lived root CA
-that works across all environments.
+USER=$1
+DAYS=$2
 
-## Contents
+if [ -z "$USER" ] || [ -z "$DAYS" ]; then
+  echo "Usage: $0 <user> <days>"
+  echo "Example: $0 ext-dev 730"
+  exit 1
+fi
 
-- \`ca/root-ca/\` - Root CA certificates (50-year validity)
-- \`ca/users/\` - User certificates with different validity periods
-- \`k8s-configs/\` - Kubernetes configurations and RBAC rules
+if [ ! -f "$USERS_DIR/$USER.key" ]; then
+  echo "Error: Key for user $USER not found."
+  exit 1
+fi
 
-## How to Use
+if [ ! -f "$CONFIGS_DIR/$USER-cert.conf" ]; then
+  echo "Error: Config for user $USER not found."
+  exit 1
+fi
 
-### 1. Distribute the Root CA to All Clusters
+# Get user info from existing cert
+CN=$(openssl x509 -in "$USERS_DIR/$USER.crt" -noout -subject | sed -n 's/.*CN = \([^,]*\).*/\1/p')
+O=$(openssl x509 -in "$USERS_DIR/$USER.crt" -noout -subject | sed -n 's/.*O = \([^,]*\).*/\1/p')
+OU=$(openssl x509 -in "$USERS_DIR/$USER.crt" -noout -subject | sed -n 's/.*OU = \([^,]*\).*/\1/p')
 
-To use the same certificates across all environments, you need to distribute the Root CA certificate
-to all Kubernetes clusters. Add the Root CA to the trusted CAs in each cluster's API server configuration.
+echo "Renewing certificate for $USER (CN=$CN, O=$O, OU=$OU) for $DAYS days..."
 
-For standard Kubernetes distributions, update the API server manifest to include:
+# Create new CSR from existing key
+openssl req -new -key "$USERS_DIR/$USER.key" -out "$USERS_DIR/$USER-renewal.csr" \
+  -subj "/CN=$CN/O=$O/OU=$OU/C=US"
 
-\`\`\`yaml
-spec:
-  containers:
-  - command:
-    - kube-apiserver
-    - --client-ca-file=/etc/kubernetes/pki/ca.crt
-    # other flags...
-\`\`\`
+# Sign with CA
+openssl x509 -req -in "$USERS_DIR/$USER-renewal.csr" -CA "$CA_DIR/ca.crt" -CAkey "$CA_DIR/ca.key" \
+  -CAcreateserial -out "$USERS_DIR/$USER-renewed.crt" -days $DAYS \
+  -extensions v3_ext -extfile "$CONFIGS_DIR/$USER-cert.conf"
 
-For managed Kubernetes solutions:
-- GKE: Use private cluster with custom CA
-- EKS: Configure authentication through AWS IAM and map to Kubernetes RBAC
-- AKS: Configure with Azure AD
+# Backup old certificate
+mv "$USERS_DIR/$USER.crt" "$USERS_DIR/$USER.crt.bak.$(date +%Y%m%d)"
 
-### 2. Apply RBAC Configurations
+# Replace with new certificate
+mv "$USERS_DIR/$USER-renewed.crt" "$USERS_DIR/$USER.crt"
 
-Apply the RBAC configurations to each cluster:
+# Clean up
+rm "$USERS_DIR/$USER-renewal.csr"
 
-\`\`\`bash
-kubectl apply -f k8s-configs/rbac-qa-developers.yaml
-kubectl apply -f k8s-configs/rbac-external-developers.yaml
-\`\`\`
-
-### 3. Distribute User Configurations
-
-Distribute the appropriate kubeconfig files to your users:
-
-- \`k8s-configs/kubeconfig-admin\` - For administrators (15-year validity)
-- \`k8s-configs/kubeconfig-qa-developer\` - For QA developers (15-year validity)
-- \`k8s-configs/kubeconfig-external-developer\` - For external developers (2-year validity)
-
-### 4. Certificate Renewal
-
-Before certificates expire, generate new certificates using the same Root CA:
-
-\`\`\`bash
-# Example for renewing an external developer certificate
-openssl genrsa -out ca/users/external-developer/external-developer-renewed.key 2048
-openssl req -new -key ca/users/external-developer/external-developer-renewed.key \
-  -out ca/users/external-developer/external-developer-renewed.csr \
-  -subj "/CN=external-developer/O=external-developers"
-openssl x509 -req -in ca/users/external-developer/external-developer-renewed.csr \
-  -CA ca/root-ca/ca.crt -CAkey ca/root-ca/ca.key -CAcreateserial \
-  -out ca/users/external-developer/external-developer-renewed.crt \
-  -days 730 -sha256
-\`\`\`
-
-## Security Considerations
-
-1. Keep the Root CA private key (\`ca/root-ca/ca.key\`) highly secure, preferably offline
-2. Consider implementing a certificate revocation mechanism for compromised certificates
-3. Document certificate expiry dates and set up reminders for renewal
-4. Implement automated certificate rotation for production systems
-
-## Environment Independence
-
-This setup ensures that certificates are not tied to specific environments because:
-
-1. The same Root CA is trusted by all clusters
-2. User certificates contain only user identity information, not environment-specific data
-3. RBAC policies can be consistently applied across environments
-
+echo "Certificate for $USER renewed successfully."
+echo "Old certificate backed up as $USER.crt.bak.$(date +%Y%m%d)"
+echo "You may need to recreate kubeconfig files to use the new certificate."
 EOF
+  
+  chmod +x "$BASE_DIR/renew-cert.sh"
+  echo -e "${GREEN}Certificate renewal script created successfully.${NC}"
+}
 
-echo "PoC setup complete. See README.md for usage instructions."
+# Create CRL management script
+create_crl_script() {
+  echo -e "${BLUE}Creating CRL management script...${NC}"
+  
+  cat > "$BASE_DIR/manage-crl.sh" <<'EOF'
+#!/bin/bash
+# Certificate Revocation List Management Script
+
+SCRIPT_DIR=$(dirname "$(readlink -f "$0")")
+USERS_DIR="$SCRIPT_DIR/users"
+CA_DIR="$SCRIPT_DIR/ca"
+INDEX_FILE="$CA_DIR/index.txt"
+SERIAL_FILE="$CA_DIR/serial"
+CRL_FILE="$CA_DIR/ca.crl"
+
+# Initialize CA database if needed
+initialize_ca_db() {
+  if [ ! -f "$INDEX_FILE" ]; then
+    touch "$INDEX_FILE"
+    echo "01" > "$SERIAL_FILE"
+    
+    # Create openssl configuration
+    cat > "$CA_DIR/openssl.cnf" <<EOT
+[ ca ]
+default_ca = CA_default
+
+[ CA_default ]
+dir = $CA_DIR
+database = $INDEX_FILE
+serial = $SERIAL_FILE
+new_certs_dir = $CA_DIR/newcerts
+certificate = $CA_DIR/ca.crt
+private_key = $CA_DIR/ca.key
+default_md = sha256
+default_crl_days = 30
+policy = policy_any
+
+[ policy_any ]
+countryName             = optional
+stateOrProvinceName     = optional
+localityName            = optional
+organizationName        = optional
+organizationalUnitName  = optional
+commonName              = supplied
+emailAddress            = optional
+EOT
+
+    # Create directory for new certificates
+    mkdir -p "$CA_DIR/newcerts"
+  fi
+}
+
+ACTION=$1
+CERT_NAME=$2
+
+if [ "$ACTION" != "generate" ] && [ "$ACTION" != "revoke" ] && [ "$ACTION" != "list" ]; then
+  echo "Usage: $0 <action> [cert_name]"
+  echo "Actions:"
+  echo "  generate - Generate a new CRL"
+  echo "  revoke <cert_name> - Revoke a certificate"
+  echo "  list - List all revoked certificates"
+  exit 1
+fi
+
+# Initialize CA database
+initialize_ca_db
+
+case $ACTION in
+  "generate")
+    echo "Generating CRL..."
+    openssl ca -gencrl -config "$CA_DIR/openssl.cnf" -out "$CRL_FILE"
+    echo "CRL generated: $CRL_FILE"
+    ;;
+    
+  "revoke")
+    if [ -z "$CERT_NAME" ]; then
+      echo "Error: Certificate name required for revoke action."
+      exit 1
+    fi
+    
+    CERT_PATH="$USERS_DIR/$CERT_NAME.crt"
+    
+    if [ ! -f "$CERT_PATH" ]; then
+      echo "Error: Certificate $CERT_NAME not found."
+      exit 1
+    }
+    
+    echo "Revoking certificate: $CERT_NAME"
+    openssl ca -config "$CA_DIR/openssl.cnf" -revoke "$CERT_PATH"
+    
+    # Generate a new CRL after revocation
+    echo "Generating updated CRL..."
+    openssl ca -gencrl -config "$CA_DIR/openssl.cnf" -out "$CRL_FILE"
+    
+    echo "Certificate $CERT_NAME revoked successfully."
+    echo "CRL updated: $CRL_FILE"
+    ;;
+    
+  "list")
+    echo "Revoked certificates:"
+    openssl crl -in "$CRL_FILE" -text -noout | grep "Serial Number" -A1
+    ;;
+esac
+EOF
+  
+  chmod +x "$BASE_DIR/manage-crl.sh"
+  echo -e "${GREEN}CRL management script created successfully.${NC}"
+}
+
+# Main execution
+echo -e "${BLUE}Starting K8s Certificate Management Setup...${NC}"
+
+create_root_ca
+
+# Create user certificates
+create_user_cert "admin" $ADMIN_CERT_DAYS "system:masters" "IT"
+create_user_cert "qa-dev" $QA_DEV_CERT_DAYS "development" "QA"
+create_user_cert "ext-dev" $EXT_DEV_CERT_DAYS "contractors" "Development"
+
+# Create universal kubeconfigs
+create_universal_kubeconfig "admin"
+create_universal_kubeconfig "qa-dev"
+create_universal_kubeconfig "ext-dev"
+
+# Create environment-specific kubeconfigs
+for env_config in "${ENVIRONMENTS[@]}"; do
+  IFS=':' read -ra ENV_PARTS <<< "$env_config"
+  ENV="${ENV_PARTS[0]}"
+  SERVER="${ENV_PARTS[1]}"
+  
+  create_kubeconfig "admin" "$ENV" "$SERVER"
+  create_kubeconfig "qa-dev" "$ENV" "$SERVER"
+  create_kubeconfig "ext-dev" "$ENV" "$SERVER"
+done
+
+# Create utility scripts
+create_context_switch_script
+create_cert_monitor_script
+create_cert_renewal_script
+create_crl_script
+
+echo -e "${GREEN}K8s Certificate Management Setup completed successfully!${NC}"
+echo ""
+echo -e "${BLUE}Available kubeconfig files:${NC}"
+ls -la "$KUBECONFIG_DIR"
+echo ""
+echo -e "${BLUE}Utility scripts:${NC}"
+echo "$BASE_DIR/switch-context.sh - Switch between environments with universal kubeconfig"
+echo "$BASE_DIR/check-cert-expiry.sh - Check certificate expiry dates"
+echo "$BASE_DIR/renew-cert.sh - Renew a certificate"
+echo "$BASE_DIR/manage-crl.sh - Manage Certificate Revocation List"
+echo ""
+echo -e "${YELLOW}Before using in production:${NC}"
+echo "1. Update the server URLs in the script to match your environment"
+echo "2. Test the certificates thoroughly in a development environment"
+echo "3. Make sure to secure the Root CA private key"
+echo "4. Configure appropriate RBAC rules for each user in Kubernetes"
